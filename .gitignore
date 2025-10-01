@@ -133,3 +133,4 @@ trace-ust-all.c
 build-femu/
 build/
 *.md
+u20s.qcow2
