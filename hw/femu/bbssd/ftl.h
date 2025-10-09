@@ -7,6 +7,12 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
+/* FDP Configuration Constants */
+#define FDP_MAX_PLACEMENT_HANDLES   32
+#define FDP_MAX_RECLAIM_GROUPS      8
+#define FDP_MAX_RECLAIM_UNITS       128
+#define FDP_DEFAULT_RUHS            4
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -42,6 +48,9 @@ enum {
     FEMU_RESET_ACCT = 5,
     FEMU_ENABLE_LOG = 6,
     FEMU_DISABLE_LOG = 7,
+    
+    FEMU_ENABLE_FDP = 8,
+    FEMU_DISABLE_FDP = 9,
 };
 
 
@@ -194,6 +203,48 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+/* FDP Reclaim Unit (RU) structure */
+typedef struct fdp_ru {
+    uint16_t ruid;              /* Reclaim Unit ID */
+    uint16_t rgid;              /* Reclaim Group ID */
+    uint8_t  ruhid;             /* RU Handle ID */
+    uint8_t  state;             /* RU state (unused/host-spec/ctrl-spec) */
+    
+    struct line *curline;       /* Current line being written in this RU */
+    struct write_pointer wp;    /* RU-specific write pointer */
+    
+    uint64_t bytes_written;     /* Total bytes written to this RU */
+    uint64_t capacity;          /* RU capacity in bytes */
+    uint64_t ru_open_time;      /* Time when RU was opened */
+    
+    int free_line_cnt;          /* Free lines in this RU */
+    QTAILQ_HEAD(ru_free_line_list, line) free_line_list;
+} fdp_ru_t;
+
+/* FDP Reclaim Group (RG) structure */
+typedef struct fdp_rg {
+    uint16_t rgid;              /* Reclaim Group ID */
+    uint16_t nruh;              /* Number of RU handles in this RG */
+    uint64_t rgslbs;            /* RG size in logical blocks */
+    fdp_ru_t *rus;              /* Array of Reclaim Units */
+} fdp_rg_t;
+
+/* FDP Configuration structure */
+typedef struct fdp_config {
+    bool enabled;               /* FDP feature enabled */
+    uint16_t nrg;               /* Number of Reclaim Groups */
+    uint16_t nruh;              /* Total number of RU Handles */
+    uint8_t fdpa;               /* FDP Attributes */
+    
+    fdp_rg_t *rgs;              /* Array of Reclaim Groups */
+    uint8_t ph_to_ruhid[FDP_MAX_PLACEMENT_HANDLES];  /* PH → RUHID mapping */
+    
+    /* Statistics */
+    uint64_t total_host_writes; /* Total host writes */
+    uint64_t total_media_writes;/* Total media writes (including GC) */
+    uint32_t ru_switches;       /* Number of RU switches */
+} fdp_config_t;
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -208,6 +259,9 @@ struct ssd {
     struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
+    
+    /* FDP (Flexible Data Placement) configuration */
+    fdp_config_t fdp_cfg;
 };
 
 void ssd_init(FemuCtrl *n);

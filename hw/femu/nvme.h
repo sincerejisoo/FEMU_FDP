@@ -339,6 +339,8 @@ enum NvmeIoCommands {
     NVME_CMD_COMPARE            = 0x05,
     NVME_CMD_WRITE_ZEROES       = 0x08,
     NVME_CMD_DSM                = 0x09,
+    NVME_CMD_IO_MGMT_RECV       = 0x12,
+    NVME_CMD_IO_MGMT_SEND       = 0x1d,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
@@ -480,6 +482,32 @@ typedef struct NvmeDsmRange {
     uint32_t    nlb;
     uint64_t    slba;
 } NvmeDsmRange;
+
+/* FDP (Flexible Data Placement) Directive Types */
+enum NvmeDirectiveTypes {
+    NVME_DIRECTIVE_IDENTIFY         = 0x00,
+    NVME_DIRECTIVE_STREAMS          = 0x01,
+    NVME_DIRECTIVE_DATA_PLACEMENT   = 0x02,
+};
+
+/* FDP DSPEC field extraction macros */
+#define NVME_DSPEC_DTYPE(dspec)     (((dspec) >> 8) & 0xF)
+#define NVME_DSPEC_PH(dspec)        ((dspec) & 0xFF)
+
+/* FDP Reclaim Unit Handle States */
+enum NvmeFdpRuhState {
+    NVME_FDP_RUH_UNUSED     = 0,
+    NVME_FDP_RUH_HOST_SPEC  = 1,
+    NVME_FDP_RUH_CTRL_SPEC  = 2,
+};
+
+/* FDP Event Types */
+enum NvmeFdpEventType {
+    NVME_FDP_EVENT_RU_NOT_FULLY_WRITTEN     = 0x0,
+    NVME_FDP_EVENT_RU_ATL_EXCEEDED          = 0x1,
+    NVME_FDP_EVENT_CTRL_RESET_RUH           = 0x2,
+    NVME_FDP_EVENT_INVALID_PH               = 0x3,
+};
 
 enum NvmeAsyncEventRequest {
     NVME_AER_TYPE_ERROR                     = 0,
@@ -654,6 +682,9 @@ enum LogIdentifier {
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CMD_EFFECTS    = 0x05,
+    NVME_LOG_FDP_CONFIGS    = 0x20,
+    NVME_LOG_FDP_STATS      = 0x21,
+    NVME_LOG_FDP_EVENTS     = 0x22,
 };
 
 typedef struct NvmePSD {
@@ -768,6 +799,8 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_WRITE_ZEROS   = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,
     NVME_ONCS_RESRVATIONS   = 1 << 5,
+    NVME_ONCS_COPY          = 1 << 8,
+    NVME_ONCS_FDP           = 1 << 9,
 };
 
 enum NvmeIdCtrlFrmw {
@@ -822,6 +855,8 @@ enum NvmeFeatureIds {
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
     NVME_TIMESTAMP                  = 0xe,
+    NVME_FDP_MODE                   = 0x1d,
+    NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_FID_MAX                    = 0x100
 };
@@ -999,6 +1034,9 @@ typedef struct NvmeRequest {
     NvmeDsmRange    *dsm_ranges;        // Array of DSM ranges
     int             dsm_nr_ranges;      // Number of ranges
     uint32_t        dsm_attributes;     // CDW11 attributes (AD, IDR, IDW)
+    
+    /* FDP (Flexible Data Placement) fields */
+    uint8_t         fdp_ph;             // Placement Handle from DSPEC
 } NvmeRequest;
 
 typedef struct DMAOff {

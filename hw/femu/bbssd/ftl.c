@@ -1,8 +1,131 @@
 #include "ftl.h"
 
-//#define FEMU_DEBUG_FTL
+#define FEMU_DEBUG_FTL
 
 static void *ftl_thread(void *arg);
+
+static inline void check_addr(int a, int max)
+{
+    ftl_assert(a >= 0 && a < max);
+}
+
+/* FDP: Get Reclaim Unit by Placement Handle */
+static inline fdp_ru_t *fdp_get_ru_by_ph(struct ssd *ssd, uint8_t ph)
+{
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    
+    if (!cfg->enabled) {
+        /* If FDP disabled, use default RU (RU 0) */
+        return &cfg->rgs[0].rus[0];
+    }
+    
+    /* Validate PH is within bounds */
+    if (ph >= FDP_MAX_PLACEMENT_HANDLES) {
+        ftl_err("Invalid PH=%d, using default RU 0\n", ph);
+        return &cfg->rgs[0].rus[0];
+    }
+    
+    /* Map PH to RUHID and get the RU */
+    uint8_t ruhid = cfg->ph_to_ruhid[ph];
+    if (ruhid >= cfg->nruh) {
+        ftl_err("Invalid RUHID=%d for PH=%d, using RU 0\n", ruhid, ph);
+        return &cfg->rgs[0].rus[0];
+    }
+    
+    /* For Phase 2, we have single RG at index 0 */
+    return &cfg->rgs[0].rus[ruhid];
+}
+
+/* FDP: Open a new line for the RU */
+static struct line *fdp_get_next_free_line(struct ssd *ssd, fdp_ru_t *ru)
+{
+    struct line *curline = NULL;
+    
+    curline = QTAILQ_FIRST(&ru->free_line_list);
+    if (!curline) {
+        ftl_err("No free lines left in RU %d !!!!\n", ru->ruhid);
+        return NULL;
+    }
+    
+    QTAILQ_REMOVE(&ru->free_line_list, curline, entry);
+    ru->free_line_cnt--;
+    
+    return curline;
+}
+
+/* FDP: Get new page from RU-specific write pointer */
+static struct ppa fdp_get_new_page(struct ssd *ssd, fdp_ru_t *ru)
+{
+    struct write_pointer *wpp = &ru->wp;
+    struct ppa ppa;
+    
+    ppa.ppa = 0;
+    ppa.g.ch = wpp->ch;
+    ppa.g.lun = wpp->lun;
+    ppa.g.pg = wpp->pg;
+    ppa.g.blk = wpp->blk;
+    ppa.g.pl = wpp->pl;
+    
+    ftl_assert(ppa.g.pl == 0);
+    
+    return ppa;
+}
+
+/* FDP: Advance RU-specific write pointer */
+static void fdp_advance_write_pointer(struct ssd *ssd, fdp_ru_t *ru)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct write_pointer *wpp = &ru->wp;
+    struct line_mgmt *lm = &ssd->lm;
+    
+    check_addr(wpp->ch, spp->nchs);
+    wpp->ch++;
+    if (wpp->ch == spp->nchs) {
+        wpp->ch = 0;
+        check_addr(wpp->lun, spp->luns_per_ch);
+        wpp->lun++;
+        
+        if (wpp->lun == spp->luns_per_ch) {
+            wpp->lun = 0;
+            check_addr(wpp->pg, spp->pgs_per_blk);
+            wpp->pg++;
+            
+            if (wpp->pg == spp->pgs_per_blk) {
+                wpp->pg = 0;
+                
+                /* Move current line to victim or full list */
+                if (wpp->curline->vpc == spp->pgs_per_line) {
+                    ftl_assert(wpp->curline->ipc == 0);
+                    QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
+                    lm->full_line_cnt++;
+                } else {
+                    ftl_assert(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line);
+                    ftl_assert(wpp->curline->ipc > 0);
+                    pqueue_insert(lm->victim_line_pq, wpp->curline);
+                    lm->victim_line_cnt++;
+                }
+                
+                /* Get next free line from this RU */
+                check_addr(wpp->blk, spp->blks_per_pl);
+                wpp->curline = NULL;
+                wpp->curline = fdp_get_next_free_line(ssd, ru);
+                
+                if (!wpp->curline) {
+                    ftl_err("RU %d out of free lines\n", ru->ruhid);
+                    abort();
+                }
+                
+                wpp->blk = wpp->curline->id;
+                check_addr(wpp->blk, spp->blks_per_pl);
+                
+                ftl_assert(wpp->pg == 0);
+                ftl_assert(wpp->lun == 0);
+                ftl_assert(wpp->ch == 0);
+                ftl_assert(wpp->pl == 0);
+            }
+        }
+    }
+}
 
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -131,11 +254,6 @@ static void ssd_init_write_pointer(struct ssd *ssd)
     wpp->pg = 0;
     wpp->blk = 0;
     wpp->pl = 0;
-}
-
-static inline void check_addr(int a, int max)
-{
-    ftl_assert(a >= 0 && a < max);
 }
 
 static struct line *get_next_free_line(struct ssd *ssd)
@@ -826,6 +944,21 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+    /* FDP: Get Reclaim Unit based on Placement Handle */
+    fdp_ru_t *ru = fdp_get_ru_by_ph(ssd, req->fdp_ph);
+    bool fdp_enabled = ssd->fdp_cfg.enabled;
+    
+    /* Log FDP writes (visible in guest dmesg via femu_log) */
+    if (fdp_enabled) {
+        femu_log("[FDP] Write: PH=%d -> RU %d, LPN=%lu-%lu, BLK=%d\n",
+                 req->fdp_ph, ru->ruhid, start_lpn, end_lpn, ru->wp.blk);
+    }
+    
+    if (fdp_enabled && req->fdp_ph > 0) {
+        ftl_debug("FDP Write: PH=%d -> RU %d, LPN=%lu-%lu\n",
+                  req->fdp_ph, ru->ruhid, start_lpn, end_lpn);
+    }
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
@@ -834,8 +967,13 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }
 
-        /* new write */
-        ppa = get_new_page(ssd);
+        /* FDP: Get new page from RU-specific or global write pointer */
+        if (fdp_enabled) {
+            ppa = fdp_get_new_page(ssd, ru);
+        } else {
+            ppa = get_new_page(ssd);
+        }
+        
         /* update maptbl */
         set_maptbl_ent(ssd, lpn, &ppa);
         /* update rmap */
@@ -843,8 +981,14 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         mark_page_valid(ssd, &ppa);
 
-        /* need to advance the write pointer here */
-        ssd_advance_write_pointer(ssd);
+        /* FDP: Advance RU-specific or global write pointer */
+        if (fdp_enabled) {
+            fdp_advance_write_pointer(ssd, ru);
+            ru->bytes_written += spp->secsz * spp->secs_per_pg;
+            ssd->fdp_cfg.total_host_writes++;
+        } else {
+            ssd_advance_write_pointer(ssd);
+        }
 
         struct nand_cmd swr;
         swr.type = USER_IO;

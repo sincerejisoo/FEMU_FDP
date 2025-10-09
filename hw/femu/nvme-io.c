@@ -65,6 +65,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
+        req->fdp_ph = 0;  /* Initialize FDP placement handle */
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         req->cqe.cid = cmd.cid;
@@ -267,6 +268,22 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     int ret;
 
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+
+    /* Extract FDP Placement Handle from DSPEC field (CDW13 bits 31:16) */
+    if (req->is_write) {
+        uint32_t cdw13 = le32_to_cpu(cmd->cdw13);
+        uint16_t dspec = (cdw13 >> 16) & 0xFFFF;
+        uint8_t dtype = NVME_DSPEC_DTYPE(dspec);
+        
+        /* Only extract PH if directive type is Data Placement (0x02) */
+        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT) {
+            req->fdp_ph = NVME_DSPEC_PH(dspec);
+        } else {
+            req->fdp_ph = 0;  /* Default placement handle */
+        }
+    } else {
+        req->fdp_ph = 0;  /* Reads don't use placement handles */
+    }
 
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
                                  data_size, meta_size);
