@@ -162,6 +162,10 @@ static void bb_init(FemuCtrl *n, Error **errp)
     /* Initialize FDP configuration (disabled by default) */
     fdp_init_config(ssd);
     
+    /* Initialize FDP features */
+    n->features.fdp_mode = 0;
+    n->features.fdp_events = 0;
+    
     /* Only advertise FDP support if enabled */
     if (ssd->fdp_cfg.enabled) {
         n->oncs |= NVME_ONCS_FDP;
@@ -170,6 +174,9 @@ static void bb_init(FemuCtrl *n, Error **errp)
         /* Update the controller identify structure directly (init_ctrl already called) */
         n->id_ctrl.oncs = cpu_to_le16(n->oncs);
         n->id_ctrl.oacs = cpu_to_le16(n->oacs);
+        
+        /* Enable FDP features */
+        n->features.fdp_mode = 1;
         
         femu_log("[FDP] Controller capabilities updated: ONCS=0x%x, OACS=0x%x\n",
                  n->oncs, n->oacs);
@@ -229,6 +236,9 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         n->oacs |= NVME_OACS_DIRECTIVES;
         n->id_ctrl.oncs = cpu_to_le16(n->oncs);
         n->id_ctrl.oacs = cpu_to_le16(n->oacs);
+        /* Initialize FDP features */
+        n->features.fdp_mode = 1;  /* FDP enabled */
+        n->features.fdp_events = 0; /* No events enabled by default */
         femu_log("%s,FDP [Enabled]! ONCS=0x%x, OACS=0x%x\n", n->devname, n->oncs, n->oacs);
         break;
     case FEMU_DISABLE_FDP:
@@ -237,6 +247,9 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         n->oacs &= ~NVME_OACS_DIRECTIVES;
         n->id_ctrl.oncs = cpu_to_le16(n->oncs);
         n->id_ctrl.oacs = cpu_to_le16(n->oacs);
+        /* Clear FDP features */
+        n->features.fdp_mode = 0;
+        n->features.fdp_events = 0;
         femu_log("%s,FDP [Disabled]! ONCS=0x%x, OACS=0x%x\n", n->devname, n->oncs, n->oacs);
         break;
     default:
@@ -250,6 +263,75 @@ static uint16_t bb_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return nvme_rw(n, ns, cmd, req);
 }
 
+/* IO Management Receive: Get RU Handle Status */
+static uint16_t bb_io_mgmt_recv(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                                 NvmeRequest *req)
+{
+    struct ssd *ssd = n->ssd;
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    NvmeIoMgmtRecvCmd *iomr = (NvmeIoMgmtRecvCmd *)cmd;
+    
+    if (!cfg->enabled) {
+        return NVME_FDP_DISABLED | NVME_DNR;
+    }
+    
+    uint8_t mo = iomr->mo;
+    uint32_t numd = le32_to_cpu(iomr->numd);
+    uint32_t len = (numd + 1) << 2;
+    
+    if (mo != NVME_IOMGMT_RUH_STATUS) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    
+    /* Calculate buffer size needed */
+    uint32_t buf_size = sizeof(NvmeRuhStatus) + 
+                        (cfg->nruh * sizeof(NvmeRuhStatusDescr));
+    
+    if (len < buf_size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    
+    /* Allocate and populate RU Handle Status */
+    uint8_t *buf = g_malloc0(buf_size);
+    NvmeRuhStatus *status = (NvmeRuhStatus *)buf;
+    
+    status->nruhsd = cpu_to_le16(cfg->nruh);
+    
+    /* Fill in status for each RU Handle */
+    NvmeRuhStatusDescr *descr = (NvmeRuhStatusDescr *)(buf + sizeof(NvmeRuhStatus));
+    for (int i = 0; i < cfg->nruh; i++) {
+        fdp_ru_t *ru = &cfg->rgs[0].rus[i];
+        descr[i].pid = cpu_to_le16(i);  /* Placement ID = RUHID for simplicity */
+        descr[i].ruhid = cpu_to_le16(ru->ruhid);
+        descr[i].earutr = 0;  /* No time limit */
+        
+        /* Calculate remaining capacity */
+        uint64_t remaining = ru->capacity - ru->bytes_written;
+        descr[i].ruamw = cpu_to_le64(remaining);
+    }
+    
+    /* Transfer to host */
+    uint16_t ret = dma_read_prp(n, buf, buf_size, cmd->dptr.prp1, cmd->dptr.prp2);
+    g_free(buf);
+    
+    return ret;
+}
+
+/* IO Management Send: Currently not implemented */
+static uint16_t bb_io_mgmt_send(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                                 NvmeRequest *req)
+{
+    struct ssd *ssd = n->ssd;
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    
+    if (!cfg->enabled) {
+        return NVME_FDP_DISABLED | NVME_DNR;
+    }
+    
+    /* IO Management Send operations are not yet implemented */
+    return NVME_INVALID_OPCODE | NVME_DNR;
+}
+
 static uint16_t bb_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           NvmeRequest *req)
 {
@@ -257,6 +339,10 @@ static uint16_t bb_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
         return bb_nvme_rw(n, ns, cmd, req);
+    case NVME_CMD_IO_MGMT_RECV:
+        return bb_io_mgmt_recv(n, ns, cmd, req);
+    case NVME_CMD_IO_MGMT_SEND:
+        return bb_io_mgmt_send(n, ns, cmd, req);
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -273,6 +359,148 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+/* FDP Log Page: Configuration (LID 0x20) */
+static uint16_t bb_fdp_config_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+{
+    struct ssd *ssd = n->ssd;
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    struct ssdparams *spp = &ssd->sp;
+    
+    if (!cfg->enabled) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+    
+    /* Calculate total size needed */
+    uint32_t config_desc_size = sizeof(NvmeFdpConfigDesc) + 
+                                (cfg->nruh * sizeof(NvmeFdpRuhDesc));
+    uint32_t total_size = sizeof(NvmeFdpConfigLog) + config_desc_size;
+    
+    if (buf_len < total_size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    
+    /* Allocate and populate log page */
+    uint8_t *buf = g_malloc0(total_size);
+    NvmeFdpConfigLog *log = (NvmeFdpConfigLog *)buf;
+    
+    log->num_configs = cpu_to_le16(1);
+    log->version = 1;
+    log->size = cpu_to_le32(total_size);
+    
+    /* Fill in configuration descriptor */
+    NvmeFdpConfigDesc *desc = (NvmeFdpConfigDesc *)(buf + sizeof(NvmeFdpConfigLog));
+    desc->size = cpu_to_le16(config_desc_size);
+    desc->fdpa = cfg->fdpa;
+    desc->vss = 0;
+    desc->nrg = cpu_to_le32(cfg->nrg);
+    desc->nruh = cpu_to_le32(cfg->nruh);
+    desc->maxpids = cpu_to_le32(FDP_MAX_PLACEMENT_HANDLES);
+    desc->nnss = 0;
+    desc->runs = cpu_to_le64((uint64_t)spp->pgs_per_blk * spp->secsz * spp->secs_per_pg);
+    desc->erutl = 0; /* No time limit */
+    
+    /* Fill in RU Handle descriptors */
+    NvmeFdpRuhDesc *ruh_desc = (NvmeFdpRuhDesc *)((uint8_t *)desc + sizeof(NvmeFdpConfigDesc));
+    for (int i = 0; i < cfg->nruh; i++) {
+        ruh_desc[i].ruhid = i;
+    }
+    
+    /* Transfer to host */
+    uint16_t ret = dma_read_prp(n, buf, total_size, cmd->dptr.prp1, cmd->dptr.prp2);
+    g_free(buf);
+    
+    return ret;
+}
+
+/* FDP Log Page: Statistics (LID 0x21) */
+static uint16_t bb_fdp_stats_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+{
+    struct ssd *ssd = n->ssd;
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    
+    fprintf(stderr, "[FEMU-FDP] bb_fdp_stats_log: buf_len=%u, sizeof=%lu\n", 
+            buf_len, sizeof(NvmeFdpStatsLog));
+    
+    if (!cfg->enabled) {
+        fprintf(stderr, "[FEMU-FDP] Stats log: FDP not enabled\n");
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+    
+    /* Transfer only what was requested, up to what we have */
+    uint32_t transfer_size = (buf_len < sizeof(NvmeFdpStatsLog)) ? buf_len : sizeof(NvmeFdpStatsLog);
+    fprintf(stderr, "[FEMU-FDP] Stats log: Transferring %u bytes\n", transfer_size);
+    
+    NvmeFdpStatsLog *log = g_malloc0(sizeof(NvmeFdpStatsLog));
+    
+    /* Populate statistics for each RU */
+    for (int i = 0; i < cfg->nruh && i < 16; i++) {
+        fdp_ru_t *ru = &cfg->rgs[0].rus[i];
+        log->host_bytes_written[i] = cpu_to_le64(ru->bytes_written);
+        log->media_bytes_written[i] = cpu_to_le64(ru->bytes_written); /* Simplified */
+        log->host_write_cmds[i] = 0; /* Could track this separately */
+        log->host_read_cmds[i] = 0;
+        log->media_wear_index[i] = 0; /* Could calculate based on erase counts */
+    }
+    
+    uint16_t ret = dma_read_prp(n, (uint8_t *)log, transfer_size,
+                                 cmd->dptr.prp1, cmd->dptr.prp2);
+    g_free(log);
+    
+    fprintf(stderr, "[FEMU-FDP] Stats log: Transfer complete, ret=0x%x\n", ret);
+    
+    return ret;
+}
+
+/* FDP Log Page: Events (LID 0x22) */
+static uint16_t bb_fdp_events_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+{
+    struct ssd *ssd = n->ssd;
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    
+    if (!cfg->enabled) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+    
+    if (buf_len < sizeof(NvmeFdpEventsLog)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    
+    /* For now, return empty event log */
+    NvmeFdpEventsLog *log = g_malloc0(sizeof(NvmeFdpEventsLog));
+    log->num_events = 0;
+    
+    uint16_t ret = dma_read_prp(n, (uint8_t *)log, sizeof(NvmeFdpEventsLog),
+                                 cmd->dptr.prp1, cmd->dptr.prp2);
+    g_free(log);
+    
+    return ret;
+}
+
+/* Get Log handler for FDP log pages */
+static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint16_t lid = dw10 & 0xffff;
+    uint32_t numdl = (dw10 >> 16);
+    uint32_t numdu = (dw11 & 0xffff);
+    uint32_t len = (((numdu << 16) | numdl) + 1) << 2;
+    
+    fprintf(stderr, "[FEMU-FDP] bb_get_log: LID=0x%x, len=%u\n", lid, len);
+    
+    switch (lid) {
+    case NVME_LOG_FDP_CONFIGS:
+        return bb_fdp_config_log(n, cmd, len);
+    case NVME_LOG_FDP_STATS:
+        fprintf(stderr, "[FEMU-FDP] Calling bb_fdp_stats_log\n");
+        return bb_fdp_stats_log(n, cmd, len);
+    case NVME_LOG_FDP_EVENTS:
+        return bb_fdp_events_log(n, cmd, len);
+    default:
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+}
+
 int nvme_register_bbssd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
@@ -282,7 +510,7 @@ int nvme_register_bbssd(FemuCtrl *n)
         .rw_check_req     = NULL,
         .admin_cmd        = bb_admin_cmd,
         .io_cmd           = bb_io_cmd,
-        .get_log          = NULL,
+        .get_log          = bb_get_log,
     };
 
     return 0;

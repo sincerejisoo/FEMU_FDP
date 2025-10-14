@@ -471,6 +471,56 @@ typedef struct NvmeDsmCmd {
     uint32_t    rsvd12[4];
 } NvmeDsmCmd;
 
+/* IO Management Command Structures */
+typedef struct NvmeIoMgmtRecvCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint64_t    rsvd2[2];
+    uint64_t    prp1;
+    uint64_t    prp2;
+    uint8_t     mo;             /* Management Operation */
+    uint8_t     rsvd11[3];
+    uint32_t    numd;           /* Number of Dwords */
+    uint32_t    rsvd13[3];
+} NvmeIoMgmtRecvCmd;
+
+typedef struct NvmeIoMgmtSendCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint64_t    rsvd2[2];
+    uint64_t    prp1;
+    uint64_t    prp2;
+    uint8_t     mo;             /* Management Operation */
+    uint8_t     rsvd11[3];
+    uint32_t    numd;           /* Number of Dwords */
+    uint32_t    rsvd13[3];
+} NvmeIoMgmtSendCmd;
+
+/* IO Management Operations */
+enum NvmeIoMgmtOp {
+    NVME_IOMGMT_RUH_STATUS      = 0x01,
+};
+
+/* RU Handle Status Descriptor */
+typedef struct NvmeRuhStatusDescr {
+    uint16_t    pid;            /* Placement Identifier */
+    uint16_t    ruhid;          /* RU Handle Identifier */
+    uint32_t    earutr;         /* Estimated Active RU Time Remaining */
+    uint64_t    ruamw;          /* RU Available Media Writes */
+    uint8_t     rsvd16[16];
+} NvmeRuhStatusDescr;
+
+/* RU Handle Status Data Structure */
+typedef struct NvmeRuhStatus {
+    uint16_t    nruhsd;         /* Number of RU Handle Status Descriptors */
+    uint8_t     rsvd2[6];
+    NvmeRuhStatusDescr ruhsd[]; /* RU Handle Status Descriptors */
+} NvmeRuhStatus;
+
 enum {
     NVME_DSMGMT_IDR = 1 << 0,
     NVME_DSMGMT_IDW = 1 << 1,
@@ -593,6 +643,8 @@ enum NvmeStatusCodes {
     NVME_ZONE_TOO_MANY_OPEN     = 0x01be,
     NVME_ZONE_INVAL_TRANSITION  = 0x01bf,
     NVME_INVALID_MEMORY_ADDRESS = 0x01C0,
+    NVME_FDP_DISABLED           = 0x01C1,
+    NVME_INVALID_PLACEMENT_ID   = 0x01C2,
     NVME_WRITE_FAULT            = 0x0280,
     NVME_UNRECOVERED_READ       = 0x0281,
     NVME_E2E_GUARD_ERROR        = 0x0282,
@@ -676,6 +728,63 @@ enum {
     NVME_CMD_EFF_CSE_MASK   = 3 << 16,
     NVME_CMD_EFF_UUID_SEL   = 1 << 19,
 };
+
+/* FDP Log Page Structures */
+typedef struct NvmeFdpRuhDesc {
+    uint8_t     ruhid;              /* RU Handle Identifier */
+    uint8_t     rsvd1[3];
+} NvmeFdpRuhDesc;
+
+typedef struct NvmeFdpConfigDesc {
+    uint16_t    size;               /* Descriptor size */
+    uint8_t     fdpa;               /* FDP Attributes */
+    uint8_t     vss;                /* Vendor Specific Size */
+    uint32_t    nrg;                /* Number of Reclaim Groups */
+    uint32_t    nruh;               /* Number of RU Handles */
+    uint32_t    maxpids;            /* Max Placement Identifiers */
+    uint32_t    nnss;               /* Number of Namespace Specific Strings */
+    uint64_t    runs;               /* RU Nominal Size */
+    uint32_t    erutl;              /* Estimated RU Time Limit */
+    uint8_t     rsvd28[36];
+    /* RU Handle Descriptors follow */
+} NvmeFdpConfigDesc;
+
+typedef struct NvmeFdpConfigLog {
+    uint16_t    num_configs;        /* Number of FDP Configurations */
+    uint8_t     version;            /* Log page version */
+    uint8_t     rsvd3;
+    uint32_t    size;               /* Size of log page */
+    uint8_t     rsvd8[8];
+    /* FDP Configuration Descriptors follow */
+} NvmeFdpConfigLog;
+
+typedef struct NvmeFdpStatsLog {
+    uint64_t    host_bytes_written[16];     /* Host bytes written per RUH */
+    uint64_t    media_bytes_written[16];    /* Media bytes written per RUH */
+    uint64_t    host_read_cmds[16];         /* Host read commands per RUH */
+    uint64_t    host_write_cmds[16];        /* Host write commands per RUH */
+    uint64_t    media_wear_index[16];       /* Media wear index per RUH */
+    uint8_t     rsvd[3712];
+} NvmeFdpStatsLog;
+
+typedef struct NvmeFdpEventEntry {
+    uint8_t     event_type;         /* Event type */
+    uint8_t     flags;              /* Flags */
+    uint16_t    ph;                 /* Placement Handle */
+    uint32_t    rsvd4;
+    uint64_t    timestamp;          /* Timestamp */
+    uint32_t    nsid;               /* Namespace ID */
+    uint8_t     rgid[2];            /* Reclaim Group ID */
+    uint8_t     ruhid;              /* RU Handle ID */
+    uint8_t     rsvd23[5];
+    uint64_t    vendor_specific[2]; /* Vendor specific data */
+} NvmeFdpEventEntry;
+
+typedef struct NvmeFdpEventsLog {
+    uint32_t    num_events;         /* Number of events */
+    uint8_t     rsvd4[60];
+    NvmeFdpEventEntry events[63];   /* Event entries (up to 63 to fit 4KB) */
+} NvmeFdpEventsLog;
 
 enum LogIdentifier {
     NVME_LOG_ERROR_INFO     = 0x01,
@@ -830,6 +939,8 @@ typedef struct NvmeFeatureVal {
     uint32_t    write_atomicity;
     uint32_t    async_config;
     uint32_t    sw_prog_marker;
+    uint32_t    fdp_mode;
+    uint32_t    fdp_events;
 } NvmeFeatureVal;
 
 #define NVME_ARB_AB(arb)        (arb & 0x7)

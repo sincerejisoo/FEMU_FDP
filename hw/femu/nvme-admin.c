@@ -678,6 +678,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_SOFTWARE_PROGRESS_MARKER:
         cqe->n.result = cpu_to_le32(n->features.sw_prog_marker);
         break;
+    case NVME_FDP_MODE:
+        cqe->n.result = cpu_to_le32(n->features.fdp_mode);
+        break;
+    case NVME_FDP_EVENTS:
+        cqe->n.result = cpu_to_le32(n->features.fdp_events);
+        break;
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -747,6 +753,12 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
+        break;
+    case NVME_FDP_MODE:
+        n->features.fdp_mode = dw11;
+        break;
+    case NVME_FDP_EVENTS:
+        n->features.fdp_events = dw11;
         break;
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -895,6 +907,21 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fw_log_info(n, cmd, len);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, cmd, csi, len, off);
+    case NVME_LOG_FDP_CONFIGS:
+    case NVME_LOG_FDP_STATS:
+    case NVME_LOG_FDP_EVENTS:
+        /* Handle FDP log pages directly */
+        fprintf(stderr, "[FEMU-FDP] nvme_get_log: LID=0x%x, len=%u, off=%lu\n", lid, len, off);
+        if (off != 0) {
+            fprintf(stderr, "[FEMU-FDP] Rejecting due to non-zero offset: %lu\n", off);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (n->ext_ops.get_log) {
+            fprintf(stderr, "[FEMU-FDP] Calling ext_ops.get_log\n");
+            return n->ext_ops.get_log(n, cmd);
+        }
+        fprintf(stderr, "[FEMU-FDP] No ext_ops.get_log handler\n");
+        return NVME_INVALID_LOG_ID | NVME_DNR;
     default:
         if (n->ext_ops.get_log) {
             return n->ext_ops.get_log(n, cmd);
