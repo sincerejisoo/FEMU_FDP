@@ -271,6 +271,8 @@ static uint16_t bb_io_mgmt_recv(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     fdp_config_t *cfg = &ssd->fdp_cfg;
     NvmeIoMgmtRecvCmd *iomr = (NvmeIoMgmtRecvCmd *)cmd;
     
+    fprintf(stderr, "[FEMU-FDP-IOMGMT] IO Management Receive: enabled=%d\n", cfg->enabled);
+    
     if (!cfg->enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
     }
@@ -279,7 +281,10 @@ static uint16_t bb_io_mgmt_recv(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t numd = le32_to_cpu(iomr->numd);
     uint32_t len = (numd + 1) << 2;
     
+    fprintf(stderr, "[FEMU-FDP-IOMGMT] MO=%d, NUMD=%d, len=%d bytes\n", mo, numd, len);
+    
     if (mo != NVME_IOMGMT_RUH_STATUS) {
+        fprintf(stderr, "[FEMU-FDP-IOMGMT] Invalid MO=%d (expected %d)\n", mo, NVME_IOMGMT_RUH_STATUS);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     
@@ -287,7 +292,10 @@ static uint16_t bb_io_mgmt_recv(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t buf_size = sizeof(NvmeRuhStatus) + 
                         (cfg->nruh * sizeof(NvmeRuhStatusDescr));
     
+    fprintf(stderr, "[FEMU-FDP-IOMGMT] Required buffer size: %d bytes (nruh=%d)\n", buf_size, cfg->nruh);
+    
     if (len < buf_size) {
+        fprintf(stderr, "[FEMU-FDP-IOMGMT] Buffer too small: len=%d < buf_size=%d\n", len, buf_size);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     
@@ -311,9 +319,11 @@ static uint16_t bb_io_mgmt_recv(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     
     /* Transfer to host */
+    fprintf(stderr, "[FEMU-FDP-IOMGMT] Transferring %d bytes to host\n", buf_size);
     uint16_t ret = dma_read_prp(n, buf, buf_size, cmd->dptr.prp1, cmd->dptr.prp2);
     g_free(buf);
     
+    fprintf(stderr, "[FEMU-FDP-IOMGMT] Transfer complete, ret=0x%x\n", ret);
     return ret;
 }
 

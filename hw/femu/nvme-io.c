@@ -271,15 +271,28 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 
     /* Extract FDP Placement Handle from DSPEC field (CDW13 bits 31:16) */
     if (req->is_write) {
+        uint32_t cdw12 = le32_to_cpu(cmd->cdw12);
         uint32_t cdw13 = le32_to_cpu(cmd->cdw13);
-        uint16_t dspec = (cdw13 >> 16) & 0xFFFF;
-        uint8_t dtype = NVME_DSPEC_DTYPE(dspec);
         
-        /* Only extract PH if directive type is Data Placement (0x02) */
-        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT) {
-            req->fdp_ph = NVME_DSPEC_PH(dspec);
+        /* Directive type is in CDW12 bits 7:0 (DTYPE field) */
+        uint8_t dtype = cdw12 & 0xFF;
+        
+        /* DSPEC is in CDW13 bits 31:16 */
+        uint16_t dspec = (cdw13 >> 16) & 0xFFFF;
+        
+        /* Placement Handle is the lower 8 bits of DSPEC */
+        uint8_t ph = dspec & 0xFF;
+        
+        fprintf(stderr, "[FEMU-FDP-IO] Write CDW12=0x%08x, CDW13=0x%08x, dtype=%d, dspec=0x%04x, ph=%d\n",
+                cdw12, cdw13, dtype, dspec, ph);
+        
+        /* Extract PH if directive type is Data Placement (0x02) OR if dspec is non-zero */
+        if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT || dspec != 0) {
+            req->fdp_ph = ph;
+            fprintf(stderr, "[FEMU-FDP-IO] Using PH=%d (dtype=%d, dspec=0x%04x)\n", req->fdp_ph, dtype, dspec);
         } else {
             req->fdp_ph = 0;  /* Default placement handle */
+            fprintf(stderr, "[FEMU-FDP-IO] No FDP directive, defaulting to PH=0\n");
         }
     } else {
         req->fdp_ph = 0;  /* Reads don't use placement handles */
