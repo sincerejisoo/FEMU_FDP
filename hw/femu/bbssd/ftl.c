@@ -111,7 +111,10 @@ static void fdp_advance_write_pointer(struct ssd *ssd, fdp_ru_t *ru)
                 wpp->curline = fdp_get_next_free_line(ssd, ru);
                 
                 if (!wpp->curline) {
-                    ftl_err("RU %d out of free lines\n", ru->ruhid);
+                    ftl_err("RU %d out of free lines! (free=%d, victim=%d, full=%d)\n",
+                            ru->ruhid, ru->free_line_cnt,
+                            ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt);
+                    ftl_err("This should not happen with RU-aware GC. Check GC implementation.\n");
                     abort();
                 }
                 
@@ -227,6 +230,7 @@ static void ssd_init_lines(struct ssd *ssd)
         line->ipc = 0;
         line->vpc = 0;
         line->pos = 0;
+        line->ru_owner = 0xFF;  /* FDP: initially no owner */
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -834,9 +838,21 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     struct line *line = get_line(ssd, ppa);
     line->ipc = 0;
     line->vpc = 0;
-    /* move this line to free line list */
-    QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
-    lm->free_line_cnt++;
+    
+    /* FDP: Return line to its original RU owner if FDP is enabled */
+    fdp_config_t *cfg = &ssd->fdp_cfg;
+    if (cfg->enabled && line->ru_owner != 0xFF && line->ru_owner < cfg->nruh) {
+        /* Return to RU-specific free list */
+        fdp_ru_t *ru = &cfg->rgs[0].rus[line->ru_owner];
+        QTAILQ_INSERT_TAIL(&ru->free_line_list, line, entry);
+        ru->free_line_cnt++;
+        ftl_debug("GC: Returned line %d to RU %d (now has %d free lines)\n",
+                  line->id, line->ru_owner, ru->free_line_cnt);
+    } else {
+        /* Return to global free line list */
+        QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
+        lm->free_line_cnt++;
+    }
 }
 
 static int do_gc(struct ssd *ssd, bool force)

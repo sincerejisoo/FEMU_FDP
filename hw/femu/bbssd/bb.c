@@ -108,6 +108,9 @@ static void fdp_distribute_lines(struct ssd *ssd)
             QTAILQ_REMOVE(&lm->free_line_list, line, entry);
             lm->free_line_cnt--;
             
+            /* Mark this line as owned by this RU */
+            line->ru_owner = ruid;
+            
             QTAILQ_INSERT_TAIL(&ru->free_line_list, line, entry);
             ru->free_line_cnt++;
         }
@@ -450,6 +453,12 @@ static uint16_t bb_fdp_stats_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
         log->host_write_cmds[i] = 0; /* Could track this separately */
         log->host_read_cmds[i] = 0;
         log->media_wear_index[i] = 0; /* Could calculate based on erase counts */
+        
+        /* Debug: print what we're about to send */
+        if (ru->bytes_written > 0) {
+            fprintf(stderr, "[FEMU-FDP-STATS] RU %d: bytes_written=%lu (0x%lx)\n", 
+                    i, ru->bytes_written, ru->bytes_written);
+        }
     }
     
     uint16_t ret = dma_read_prp(n, (uint8_t *)log, transfer_size,

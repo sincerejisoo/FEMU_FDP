@@ -1,0 +1,88 @@
+# FIO Noisy Neighbor Scenario - Mixed Lifetime Workloads
+# Demonstrates write amplification from mixing hot/cold data
+# WITHOUT FDP: All data mixed → high write amplification
+# WITH FDP: Separate placement handles → low write amplification
+
+[global]
+ioengine=libaio
+direct=1
+bs=4k
+iodepth=32
+runtime=300
+time_based=1
+group_reporting=1
+filename=/dev/nvme0n1
+create_serialize=0
+continue_on_error=none
+
+#############################################
+# HOT DATA - Frequently Updated (Short Lifetime)
+#############################################
+[hot-data]
+# Simulates cache, temporary files, or frequently updated records
+# High update rate → data dies quickly → becomes garbage fast
+stonewall
+rw=randwrite
+size=2G
+offset=0
+numjobs=2
+
+# Very high overwrite rate - same blocks rewritten constantly
+# This creates a lot of garbage in the SSD
+random_distribution=zipf:1.5
+
+rate_iops=5000
+
+#############################################
+# COLD DATA - Rarely Updated (Long Lifetime)
+#############################################
+[cold-data]
+# Simulates logs, archives, or infrequently accessed data
+# Low update rate → data lives long → stays valid
+stonewall
+rw=write
+size=4G
+offset=2G
+numjobs=1
+
+# Sequential or slightly random writes
+percentage_random=10
+
+rate_iops=1000
+
+#############################################
+# WARM DATA - Moderate Updates (Medium Lifetime)
+#############################################
+[warm-data]
+# Simulates user data with periodic updates
+# Moderate update rate → mixed lifetime
+stonewall
+rw=randrw
+rwmixread=50
+rwmixwrite=50
+size=2G
+offset=6G
+numjobs=1
+
+random_distribution=random
+
+rate_iops=3000
+
+#############################################
+# VERY HOT DATA - Extreme Churn (Ultra-Short Lifetime)
+#############################################
+[very-hot-data]
+# Simulates journal, redo logs, or high-frequency counters
+# Extremely high rewrite rate on small working set
+stonewall
+rw=randwrite
+size=512M
+offset=8G
+numjobs=1
+
+# Focus on very small working set - same 128MB rewritten constantly
+# This creates maximum garbage generation
+random_distribution=zipf:2.0
+
+rate_iops=8000
+

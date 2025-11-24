@@ -169,6 +169,7 @@ typedef struct line {
     int id;  /* line id, the same as corresponding block id */
     int ipc; /* invalid page count in this line */
     int vpc; /* valid page count in this line */
+    uint8_t ru_owner; /* FDP: which RU owns this line (0xFF = global/no owner) */
     QTAILQ_ENTRY(line) entry; /* in either {free,victim,full} list */
     /* position in the priority queue for victim lines */
     size_t                  pos;

@@ -1,0 +1,119 @@
+╔═══════════════════════════════════════════════════════════════════╗
+║                 GC DEBUG QUICK START CARD                         ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+📋 VERIFY RU-AWARE GC IS WORKING
+
+┌───────────────────────────────────────────────────────────────────┐
+│ STEP 1: COMPILE (Host)                                            │
+└───────────────────────────────────────────────────────────────────┘
+cd ~/POSTECH/FEMU/build-femu
+make -j4
+
+┌───────────────────────────────────────────────────────────────────┐
+│ STEP 2: START FEMU (Host - Terminal 1)                           │
+└───────────────────────────────────────────────────────────────────┘
+cd ~/POSTECH/FEMU/build-femu
+./run-blackbox.sh
+
+┌───────────────────────────────────────────────────────────────────┐
+│ STEP 3: MONITOR LOGS (Host - Terminal 2 - OPTIONAL)              │
+└───────────────────────────────────────────────────────────────────┘
+cd ~/POSTECH/FEMU/fio_scenarios
+./monitor_femu_gc_logs.sh
+
+┌───────────────────────────────────────────────────────────────────┐
+│ STEP 4: RUN GC TEST (VM - Terminal 3)                            │
+└───────────────────────────────────────────────────────────────────┘
+ssh -p 8080 femu@localhost
+cd ~/fio_scenarios
+sudo ./debug_gc_behavior.sh
+
+┌───────────────────────────────────────────────────────────────────┐
+│ STEP 5: ANALYZE RESULTS (Host - Terminal 4)                      │
+└───────────────────────────────────────────────────────────────────┘
+cd ~/POSTECH/FEMU/fio_scenarios
+./analyze_gc_logs.sh
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                    WHAT TO LOOK FOR                               ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+✅ SUCCESS (in analyze_gc_logs.sh):
+   ┌───────────────────────────────────────────────────────────────┐
+   │ RU-aware Returns: 45                                          │
+   │ Out of Lines Errors: 0                                        │
+   │                                                               │
+   │ PASS: RU-aware GC is WORKING correctly! ✓                    │
+   └───────────────────────────────────────────────────────────────┘
+
+✅ SUCCESS (in FEMU console / Terminal 2):
+   ┌───────────────────────────────────────────────────────────────┐
+   │ [RU-GC] GC: Returned line 65 to RU 1 (now has 46 free lines) │
+   │ [RU-GC] GC: Returned line 70 to RU 1 (now has 47 free lines) │
+   │                                                               │
+   │ ← This is the KEY message!                                   │
+   └───────────────────────────────────────────────────────────────┘
+
+❌ FAILURE (in analyze_gc_logs.sh):
+   ┌───────────────────────────────────────────────────────────────┐
+   │ RU-aware Returns: 0                                           │
+   │ Out of Lines Errors: 1                                        │
+   │                                                               │
+   │ FAIL: RU-aware GC has issues ✗                               │
+   └───────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                      NEXT STEPS                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+IF TEST PASSES:
+  → Run full QoS test:
+    cd ~/fio_scenarios
+    sudo ./01_prefill_and_test.sh
+    
+  → Expected: 20-40% P99 latency improvement with FDP!
+
+IF TEST FAILS:
+  → Check code changes:
+    grep "ru_owner" ~/POSTECH/FEMU/hw/femu/bbssd/*.{c,h}
+    
+  → Recompile clean:
+    cd ~/POSTECH/FEMU/build-femu
+    make clean && make -j4
+    
+  → Review docs:
+    less ~/POSTECH/FEMU/GC_DEBUG_GUIDE.md
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                    DOCUMENTATION                                  ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Quick Start:     GC_DEBUG_README.md
+Complete Guide:  GC_DEBUG_GUIDE.md
+Implementation:  RU_AWARE_GC_IMPLEMENTATION.md
+This Card:       QUICK_START_GC_DEBUG.txt
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                   KEY TAKEAWAY                                    ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+SUCCESS = Seeing "GC: Returned line X to RU Y" in FEMU logs!
+
+If you see that message → RU-aware GC is working! ✓
+If you don't → Need to debug implementation ✗
+
+╔═══════════════════════════════════════════════════════════════════╗
+║              EXPECTED TIMELINE                                    ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Compile:        2 minutes
+GC Test:        5 minutes
+Analysis:       Instant
+────────────────────────────
+Total:          ~7 minutes to verify GC!
+
+Then full test: 25 minutes (01_prefill_and_test.sh)
+
+Good luck! 🚀
+

@@ -1,0 +1,51 @@
+# Victim + Noisy Neighbor Baseline (WITHOUT FDP)
+# Demonstrates QoS interference when workloads are mixed
+# Expected: High victim latency variance due to GC interference
+
+[global]
+ioengine=libaio
+direct=1
+bs=4k
+iodepth=32
+runtime=30
+time_based=1
+group_reporting=0
+filename=/dev/nvme0n1
+
+#############################################
+# VICTIM WORKLOAD - Latency Sensitive
+#############################################
+[victim-workload]
+# Simulates latency-sensitive application (e.g., database, user-facing service)
+# This workload should have predictable, low latency
+# WITHOUT FDP: Gets impacted by noisy neighbor's GC
+stonewall
+rw=randrw
+rwmixread=70
+rwmixwrite=30
+size=2G
+offset=0
+numjobs=1
+
+# Moderate, consistent rate
+rate_iops=300
+
+#############################################
+# NOISY NEIGHBOR - High Churn / GC Generator
+#############################################
+[noisy-neighbor]
+# Simulates aggressive workload that generates lots of garbage
+# High rewrite rate on small working set → frequent GC
+# WITHOUT FDP: This GC impacts the victim workload
+stonewall
+rw=randwrite
+size=1G
+offset=3G
+numjobs=1
+
+# Very high overwrite rate - creates maximum garbage
+random_distribution=zipf:2.0
+
+# Aggressive IOPS - triggers GC frequently
+rate_iops=600
+
