@@ -1,0 +1,13 @@
+test_name=WITH_FDP
+test_start=1764103616
+test_end=1764104366
+test_duration=750
+warmup_ops=6000
+warmup_duration=559
+victim_writes=500
+noisy_writes=15000
+overwrites=20000
+overwrite_duration=155
+victim_reads=500
+prefill_gb=0
+device_capacity_gb=32

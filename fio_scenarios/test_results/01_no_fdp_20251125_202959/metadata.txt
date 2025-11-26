@@ -1,0 +1,13 @@
+test_name=NO_FDP
+test_start=1764102600
+test_end=1764103412
+test_duration=812
+warmup_ops=6000
+warmup_duration=559
+victim_writes=500
+noisy_writes=15000
+overwrites=20000
+overwrite_duration=154
+victim_reads=500
+prefill_gb=25
+device_capacity_gb=32

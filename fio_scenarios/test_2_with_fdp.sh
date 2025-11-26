@@ -47,12 +47,13 @@ This test measures victim workload latency when:
 
 Workload:
   - Pre-fill: NONE (preserves free lines for RU distribution)
+  - WARM-UP: 10 minutes, ~6000 writes at 10 IOPS to RU 1
   - Victim writes: 500 ops to RU 0 (PH=0)
-  - Noisy writes: 7000 ops to RU 1 (PH=1)
-  - EXTREME overwrites: 7000 ops to RU 1 ONLY
-  - Victim reads: 300 ops (measures protected latency)
+  - Noisy writes: 15000 ops to RU 1 (PH=1)
+  - MASSIVE overwrites: 20000 ops to RU 1 ONLY
+  - Victim reads: 500 ops (measures protected latency)
 
-Duration: ~12 minutes
+Duration: ~25 minutes
 
 EOF
 
@@ -80,6 +81,48 @@ fi
 echo_success "FDP enabled (ONCS=$ONCS)"
 
 echo ""
+echo_info "=== WARM-UP PHASE: 10 minutes to RU 1 (throttled) ==="
+echo_info "This stabilizes GC in RU 1 before testing..."
+TEST_START=$(date +%s)
+WARMUP_START=$(date +%s)
+WARMUP_LAT_FILE="${RESULT_DIR}/warmup_latencies.txt"
+> "$WARMUP_LAT_FILE"
+
+WARMUP_COUNT=0
+WARMUP_TARGET=6000  # Target ~6000 operations over 10 minutes
+
+while [ $(($(date +%s) - WARMUP_START)) -lt 600 ]; do  # 10 minutes = 600 seconds
+    LBA=$((RANDOM % 3000000))
+    START=$(date +%s%N)
+    nvme write $NVME_NS --start-block=$LBA --block-count=7 \
+        --data=/dev/zero --data-size=4096 \
+        --dir-type=2 --dir-spec=1 > /dev/null 2>&1  # PH=1 → RU 1
+    END=$(date +%s%N)
+    LATENCY=$(( (END - START) / 1000 ))
+    echo "$LATENCY" >> "$WARMUP_LAT_FILE"
+    WARMUP_COUNT=$((WARMUP_COUNT + 1))
+    
+    # Throttle: Sleep 90ms between writes (~10 IOPS sustained)
+    # This prevents overwhelming RU 1 and allows GC to keep up
+    sleep 0.09
+    
+    if [ $((WARMUP_COUNT % 500)) -eq 0 ]; then
+        ELAPSED=$(($(date +%s) - WARMUP_START))
+        echo_info "  Warm-up (RU 1): ${ELAPSED}s / 600s, $WARMUP_COUNT ops (~10 IOPS)"
+    fi
+    
+    # Safety: Exit if we hit target early (prevents over-filling RU 1)
+    if [ $WARMUP_COUNT -ge $WARMUP_TARGET ]; then
+        echo_info "  Reached target $WARMUP_TARGET ops, completing warm-up..."
+        break
+    fi
+done
+
+WARMUP_END=$(date +%s)
+WARMUP_DURATION=$((WARMUP_END - WARMUP_START))
+echo_success "Warm-up complete! $WARMUP_COUNT ops to RU 1 in ${WARMUP_DURATION}s"
+
+echo ""
 echo_info "Phase 1: Writing 'victim' data to RU 0 (500 ops)"
 
 VICTIM_LAT_FILE="${RESULT_DIR}/victim_write_latencies.txt"
@@ -103,13 +146,13 @@ done
 echo_success "Victim data written to RU 0 (500 ops)"
 
 echo ""
-echo_info "Phase 2: Writing 'noisy' data to RU 1 (7000 ops)"
+echo_info "Phase 2: Writing 'noisy' data to RU 1 (15000 ops)"
 
 NOISY_LAT_FILE="${RESULT_DIR}/noisy_write_latencies.txt"
 > "$NOISY_LAT_FILE"
 
-for i in {1..7000}; do
-    LBA=$((RANDOM % 2000000))
+for i in {1..15000}; do
+    LBA=$((RANDOM % 3000000))
     START=$(date +%s%N)
     nvme write $NVME_NS --start-block=$LBA --block-count=7 \
         --data=/dev/zero --data-size=4096 \
@@ -118,26 +161,27 @@ for i in {1..7000}; do
     LATENCY=$(( (END - START) / 1000 ))
     echo "$LATENCY" >> "$NOISY_LAT_FILE"
     
-    if [ $((i % 1000)) -eq 0 ]; then
-        echo_info "  Noisy writes (RU 1): $i/7000"
+    if [ $((i % 2000)) -eq 0 ]; then
+        echo_info "  Noisy writes (RU 1): $i/15000"
     fi
 done
 
-echo_success "Noisy data written to RU 1 (7000 ops)"
+echo_success "Noisy data written to RU 1 (15000 ops)"
 
 echo ""
-echo_info "Phase 2b: EXTREME overwrites to RU 1 (7000 ops) INTERLEAVED with victim reads"
-echo_info "RU 1 has MASSIVE GC, RU 0 (victim) should be PROTECTED!"
+echo_info "Phase 2b: MASSIVE overwrites to RU 1 (20000 ops) INTERLEAVED with victim reads"
+echo_info "RU 1 has CONTINUOUS GC, RU 0 (victim) should be FULLY PROTECTED!"
 
 OVERWRITE_LAT_FILE="${RESULT_DIR}/overwrite_latencies.txt"
 VICTIM_READ_LAT_FILE="${RESULT_DIR}/victim_read_latencies.txt"
 > "$OVERWRITE_LAT_FILE"
 > "$VICTIM_READ_LAT_FILE"
 
+OVERWRITE_START=$(date +%s)
 READ_COUNT=0
-for i in {1..7000}; do
+for i in {1..20000}; do
     # Overwrite to RU 1 to force GC there
-    LBA=$((RANDOM % 2000000))
+    LBA=$((RANDOM % 3000000))
     START=$(date +%s%N)
     nvme write $NVME_NS --start-block=$LBA --block-count=7 \
         --data=/dev/zero --data-size=4096 \
@@ -146,9 +190,9 @@ for i in {1..7000}; do
     LATENCY=$(( (END - START) / 1000 ))
     echo "$LATENCY" >> "$OVERWRITE_LAT_FILE"
     
-    # Every 23 overwrites, READ from victim area (RU 0)
+    # Every 40 overwrites, READ from victim area (RU 0)
     # This measures if RU 0 is protected from RU 1's GC
-    if [ $((i % 23)) -eq 0 ] && [ $READ_COUNT -lt 300 ]; then
+    if [ $((i % 40)) -eq 0 ] && [ $READ_COUNT -lt 500 ]; then
         LBA_READ=$((RANDOM % 1000000))
         START_READ=$(date +%s%N)
         nvme read $NVME_NS --start-block=$LBA_READ --block-count=7 \
@@ -159,13 +203,16 @@ for i in {1..7000}; do
         READ_COUNT=$((READ_COUNT + 1))
     fi
     
-    if [ $((i % 1000)) -eq 0 ]; then
-        echo_info "  Overwrites (RU 1): $i/7000, Victim reads (RU 0): $READ_COUNT/300"
+    if [ $((i % 2000)) -eq 0 ]; then
+        echo_info "  Overwrites (RU 1): $i/20000, Victim reads (RU 0): $READ_COUNT/500"
     fi
 done
 
-echo_success "EXTREME overwrites to RU 1 complete with interleaved victim reads!"
-echo_info "Victim reads: $READ_COUNT ops from RU 0 (should be protected)"
+OVERWRITE_END=$(date +%s)
+OVERWRITE_DURATION=$((OVERWRITE_END - OVERWRITE_START))
+
+echo_success "MASSIVE overwrites to RU 1 complete with interleaved victim reads!"
+echo_info "Victim reads: $READ_COUNT ops from RU 0 (should be fully protected)"
 
 echo ""
 echo_info "Collecting FDP statistics..."
@@ -214,6 +261,25 @@ analyze_latency() {
 }
 
 analyze_latency "$VICTIM_READ_LAT_FILE" "Victim Reads (WITH FDP)"
+
+# Save metadata for Python analysis
+TEST_END=$(date +%s)
+TEST_DURATION=$((TEST_END - TEST_START))
+cat > "${RESULT_DIR}/metadata.txt" << METADATA
+test_name=WITH_FDP
+test_start=$TEST_START
+test_end=$TEST_END
+test_duration=$TEST_DURATION
+warmup_ops=$WARMUP_COUNT
+warmup_duration=$WARMUP_DURATION
+victim_writes=500
+noisy_writes=15000
+overwrites=20000
+overwrite_duration=$OVERWRITE_DURATION
+victim_reads=$READ_COUNT
+prefill_gb=0
+device_capacity_gb=32
+METADATA
 
 echo ""
 echo_success "Test 2 complete!"
